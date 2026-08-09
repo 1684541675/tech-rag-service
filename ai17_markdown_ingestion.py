@@ -18,6 +18,9 @@ DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "data" / "bagu_chunks.jsonl"
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 FENCE_RE = re.compile(r"^\s*```(.*)\s*$")
 IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+HEADING_NUMBER_RE = re.compile(r"^[一二三四五六七八九十百零〇两]+\s*、\s*")
+MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)")
+INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
 
 
@@ -121,9 +124,9 @@ def split_sections(lines: list[MarkdownLine]) -> list[Section]:
         if heading_match:
             flush(line.number - 1)
             level = len(heading_match.group(1))
-            title = heading_match.group(2).strip()
-            heading_path = heading_path[: level - 1] + [title]
-            current_title = title
+            raw_title = heading_match.group(2).strip()
+            heading_path = heading_path[: level - 1] + [raw_title]
+            current_title = clean_heading_title(raw_title)
             current_heading_path = heading_path.copy()
             current_start = line.number
             current_lines = []
@@ -145,8 +148,10 @@ def parse_section_elements(section: Section) -> list[ParsedElement]:
         nonlocal text_buffer
         paragraphs = split_paragraphs(text_buffer)
         for paragraph in paragraphs:
-            body = "\n".join(line.text.strip() for line in paragraph).strip()
-            if not body:
+            raw_body = "\n".join(line.text.strip() for line in paragraph).strip()
+            image_urls = tuple(extract_image_urls(raw_body))
+            body = clean_markdown_text(raw_body)
+            if not body and not image_urls:
                 continue
             elements.append(
                 ParsedElement(
@@ -154,7 +159,7 @@ def parse_section_elements(section: Section) -> list[ParsedElement]:
                     text=body,
                     line_start=paragraph[0].number,
                     line_end=paragraph[-1].number,
-                    image_urls=tuple(extract_image_urls(body)),
+                    image_urls=image_urls,
                 )
             )
         text_buffer = []
@@ -257,8 +262,11 @@ def collect_table_lines(lines: list[MarkdownLine], start: int) -> list[MarkdownL
 
 
 def parse_table(lines: list[MarkdownLine]) -> TableData:
-    markdown = "\n".join(line.text for line in lines)
-    raw_rows = [split_table_cells(line.text) for line in lines]
+    markdown = "\n".join(clean_markdown_text(line.text) for line in lines)
+    raw_rows = [
+        [clean_markdown_text(cell) for cell in split_table_cells(line.text)]
+        for line in lines
+    ]
     columns = raw_rows[0] if raw_rows else []
     data_rows = raw_rows[2:] if len(raw_rows) >= 2 and is_table_separator(raw_rows[1]) else raw_rows[1:]
 
@@ -313,6 +321,19 @@ def extract_image_urls(text: str) -> list[str]:
     return [match.group(1).strip() for match in IMAGE_RE.finditer(text)]
 
 
+def clean_heading_title(title: str) -> str:
+    return HEADING_NUMBER_RE.sub("", title).strip()
+
+
+def clean_markdown_text(text: str) -> str:
+    text = IMAGE_RE.sub("", text)
+    text = MARKDOWN_LINK_RE.sub(r"\1", text)
+    text = INLINE_CODE_RE.sub(r"\1", text)
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"__(.*?)__", r"\1", text, flags=re.DOTALL)
+    return "\n".join(line.rstrip() for line in text.splitlines()).strip()
+
+
 def build_jsonl_chunks(
     sections: list[Section],
     source: str = DEFAULT_SOURCE,
@@ -331,7 +352,7 @@ def build_jsonl_chunks(
                 return
 
             type_counts["text"] += 1
-            text = "\n\n".join(element.text for element in text_group)
+            text = "\n\n".join(element.text for element in text_group if element.text)
             image_urls = unique_preserve_order(
                 url for element in text_group for url in element.image_urls
             )

@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from math import sqrt
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
 
 from ai17_markdown_ingestion import DEFAULT_OUTPUT_PATH as DEFAULT_JSONL_PATH
 
@@ -15,8 +15,45 @@ from ai17_markdown_ingestion import DEFAULT_OUTPUT_PATH as DEFAULT_JSONL_PATH
 RetrievalMode = Literal["keyword", "vector", "hybrid"]
 
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_+#.]+|[\u4e00-\u9fff]+")
-CJK_STOP_BIGRAMS = {
-    "一个",
+HEADING_NUMBER_RE = re.compile(r"^[一二三四五六七八九十百零〇两]+\s*、\s*")
+
+EN_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "how",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "to",
+    "what",
+    "when",
+    "where",
+    "which",
+    "why",
+    "with",
+}
+
+QUESTION_STOP_PHRASES = (
+    "分别是什么",
+    "有什么区别",
+    "常见情况",
+    "为什么",
+    "有哪些",
+    "是什么",
+    "怎么办",
     "什么",
     "如何",
     "怎么",
@@ -28,7 +65,72 @@ CJK_STOP_BIGRAMS = {
     "实现",
     "解决",
     "区别",
+    "分别",
+    "常见",
+    "情况",
+    "关系",
+    "不是",
+)
+
+CJK_STOP_WORDS = {
+    "一个",
+    "这个",
+    "那个",
+    "以及",
+    "或者",
+    "并且",
+    "如果",
+    "因为",
+    "所以",
+    "什么",
+    "如何",
+    "怎么",
+    "哪些",
+    "是否",
+    "可以",
+    "进行",
+    "使用",
+    "实现",
+    "解决",
+    "区别",
+    "为什么",
+    "分别",
+    "常见",
+    "情况",
+    "关系",
+    "的是",
+    "有什么",
+    "有哪些",
+    "是什么",
+    "怎么办",
+    "和",
+    "与",
+    "的",
+    "了",
+    "在",
 }
+
+DOMAIN_PHRASES = (
+    "缓存穿透",
+    "缓存击穿",
+    "缓存雪崩",
+    "水平触发",
+    "边缘触发",
+    "三次握手",
+    "两次握手",
+    "四次挥手",
+    "虚函数表",
+    "虚函数",
+    "纯虚函数",
+    "索引失效",
+    "最左前缀",
+    "覆盖索引",
+    "倒排索引",
+    "线程池",
+    "红黑树",
+    "多态",
+    "epoll",
+)
 
 
 @dataclass(frozen=True)
@@ -94,8 +196,7 @@ def load_jsonl_chunks(path: Path = DEFAULT_JSONL_PATH) -> list[JsonlChunk]:
 
 def build_search_text(chunk: JsonlChunk) -> str:
     parts = [
-        " > ".join(chunk.heading_path),
-        chunk.title,
+        build_title_search_text(chunk),
         chunk.text,
     ]
 
@@ -111,12 +212,22 @@ def build_search_text(chunk: JsonlChunk) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def build_title_search_text(chunk: JsonlChunk) -> str:
+    title_parts = [chunk.title]
+    title_parts.extend(clean_heading_title(title) for title in chunk.heading_path)
+    return "\n".join(unique_preserve_order(part for part in title_parts if part))
+
+
+def clean_heading_title(title: str) -> str:
+    return HEADING_NUMBER_RE.sub("", title).strip()
+
+
 def tokenize(text: str) -> list[str]:
     tokens: list[str] = []
     for raw_token in TOKEN_RE.findall(text.lower()):
         if contains_cjk(raw_token):
             tokens.extend(tokenize_cjk(raw_token))
-        else:
+        elif raw_token not in EN_STOP_WORDS:
             tokens.append(raw_token)
     return tokens
 
@@ -126,14 +237,38 @@ def contains_cjk(text: str) -> bool:
 
 
 def tokenize_cjk(text: str) -> list[str]:
-    if len(text) <= 2:
-        return [] if text in CJK_STOP_BIGRAMS else [text]
+    normalized = text
+    for phrase in QUESTION_STOP_PHRASES:
+        normalized = normalized.replace(phrase, " ")
+    for char in ("和", "与", "的", "了", "在"):
+        normalized = normalized.replace(char, " ")
 
-    return [
-        text[index : index + 2]
-        for index in range(len(text) - 1)
-        if text[index : index + 2] not in CJK_STOP_BIGRAMS
+    tokens: list[str] = []
+    for segment in normalized.split():
+        tokens.extend(tokenize_cjk_segment(segment))
+    return tokens
+
+
+def tokenize_cjk_segment(segment: str) -> list[str]:
+    tokens = [
+        phrase
+        for phrase in DOMAIN_PHRASES
+        if contains_cjk(phrase) and phrase in segment
     ]
+
+    if len(segment) <= 2:
+        if segment and segment not in CJK_STOP_WORDS:
+            tokens.append(segment)
+        return tokens
+
+    tokens.extend(
+        token
+        for token in (
+            segment[index : index + 2] for index in range(len(segment) - 1)
+        )
+        if token not in CJK_STOP_WORDS
+    )
+    return tokens
 
 
 def keyword_score(query: str, chunk: JsonlChunk) -> float:
@@ -141,7 +276,7 @@ def keyword_score(query: str, chunk: JsonlChunk) -> float:
     if not query_tokens:
         return 0.0
 
-    title_tokens = set(tokenize(chunk.title + " " + " ".join(chunk.heading_path)))
+    title_tokens = set(tokenize(build_title_search_text(chunk)))
     body_tokens = set(tokenize(build_search_text(chunk)))
 
     title_overlap = query_tokens & title_tokens
@@ -282,6 +417,17 @@ def optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def unique_preserve_order(items: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
 
 
 def parse_args() -> argparse.Namespace:
