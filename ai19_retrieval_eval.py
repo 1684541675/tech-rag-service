@@ -8,7 +8,9 @@ from typing import Any
 
 from ai17_markdown_ingestion import DEFAULT_OUTPUT_PATH as DEFAULT_JSONL_PATH
 from ai18_jsonl_retrieval import (
+    DEFAULT_EMBEDDING_CACHE_PATH,
     EmbeddedJsonlChunk,
+    EmbeddingProvider,
     JsonlChunk,
     RetrievalHit,
     RetrievalMode,
@@ -89,6 +91,7 @@ def evaluate_case(
     embedded_chunks: list[EmbeddedJsonlChunk],
     top_k: int,
     mode: RetrievalMode,
+    embedding_provider: EmbeddingProvider,
 ) -> CaseResult:
     result = retrieve_with_diagnostics(
         query=case.query,
@@ -96,6 +99,7 @@ def evaluate_case(
         embedded_chunks=embedded_chunks,
         top_k=top_k,
         mode=mode,
+        embedding_provider=embedding_provider,
     )
     top_headings = [chunk_heading(hit) for hit in result.hits]
     expected_rank = find_expected_rank(case.expected_heading, top_headings)
@@ -232,6 +236,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval", type=Path, default=DEFAULT_EVAL_PATH)
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--mode", choices=["keyword", "vector", "hybrid"], default="hybrid")
+    parser.add_argument(
+        "--embedding-provider",
+        choices=["fake", "zhipu"],
+        default="fake",
+        help="Use fake hash vectors by default, or Zhipu embedding-3 when ZAI_API_KEY is set.",
+    )
+    parser.add_argument(
+        "--embedding-cache",
+        type=Path,
+        default=DEFAULT_EMBEDDING_CACHE_PATH,
+        help="Local cache for Zhipu chunk embeddings.",
+    )
+    parser.add_argument(
+        "--refresh-embedding-cache",
+        action="store_true",
+        help="Regenerate the Zhipu chunk embedding cache.",
+    )
     parser.add_argument("--show-failures", action="store_true")
     return parser.parse_args()
 
@@ -239,7 +260,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     chunks = load_jsonl_chunks(args.jsonl)
-    embedded_chunks = embed_chunks(chunks)
+    embedded_chunks = embed_chunks(
+        chunks,
+        provider=args.embedding_provider,
+        cache_path=args.embedding_cache,
+        refresh_cache=args.refresh_embedding_cache,
+    )
     cases = load_eval_cases(args.eval)
     results = [
         evaluate_case(
@@ -248,6 +274,7 @@ def main() -> None:
             embedded_chunks=embedded_chunks,
             top_k=args.top_k,
             mode=args.mode,
+            embedding_provider=args.embedding_provider,
         )
         for case in cases
     ]
@@ -255,6 +282,7 @@ def main() -> None:
     print(f"chunks={len(chunks)}")
     print(f"eval_cases={len(cases)}")
     print(f"mode={args.mode}")
+    print(f"embedding_provider={args.embedding_provider}")
     print(f"top_k={args.top_k}")
     print()
     print_summary(results, args.top_k)

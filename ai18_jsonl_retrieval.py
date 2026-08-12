@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from math import sqrt
 from pathlib import Path
@@ -13,6 +17,13 @@ from ai17_markdown_ingestion import DEFAULT_OUTPUT_PATH as DEFAULT_JSONL_PATH
 
 
 RetrievalMode = Literal["keyword", "vector", "hybrid"]
+EmbeddingProvider = Literal["fake", "zhipu"]
+
+DEFAULT_ZHIPU_MODEL = "embedding-3"
+DEFAULT_ZHIPU_DIMENSIONS = 1024
+DEFAULT_EMBEDDING_CACHE_PATH = Path(__file__).resolve().parent / "data" / "bagu_embeddings_zhipu.json"
+ZHIPU_EMBEDDINGS_URL = "https://open.bigmodel.cn/api/paas/v4/embeddings"
+ZHIPU_BATCH_SIZE = 64
 
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_+#.]+|[\u4e00-\u9fff]+")
 HEADING_NUMBER_RE = re.compile(r"^[一二三四五六七八九十百零〇两]+\s*、\s*")
@@ -446,9 +457,125 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right))
 
 
-def embed_chunks(chunks: list[JsonlChunk]) -> list[EmbeddedJsonlChunk]:
+def zhipu_embed_texts(
+    texts: list[str],
+    *,
+    model: str = DEFAULT_ZHIPU_MODEL,
+    dimensions: int = DEFAULT_ZHIPU_DIMENSIONS,
+    api_key: str | None = None,
+) -> list[list[float]]:
+    if not texts:
+        return []
+
+    resolved_api_key = api_key or os.getenv("ZAI_API_KEY")
+    if not resolved_api_key:
+        raise RuntimeError("ZAI_API_KEY is not set; configure it before using zhipu embeddings.")
+
+    body = json.dumps(
+        {
+            "model": model,
+            "input": texts,
+            "dimensions": dimensions,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        ZHIPU_EMBEDDINGS_URL,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {resolved_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Zhipu embedding request failed: HTTP {exc.code} {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Zhipu embedding request failed: {exc}") from exc
+
+    data = sorted(payload.get("data", []), key=lambda item: item.get("index", 0))
+    vectors = [normalize([float(value) for value in item["embedding"]]) for item in data]
+    if len(vectors) != len(texts):
+        raise RuntimeError(
+            f"Zhipu embedding response count mismatch: expected {len(texts)}, got {len(vectors)}"
+        )
+    return vectors
+
+
+def zhipu_embed_text(
+    text: str,
+    *,
+    model: str = DEFAULT_ZHIPU_MODEL,
+    dimensions: int = DEFAULT_ZHIPU_DIMENSIONS,
+) -> list[float]:
+    return zhipu_embed_texts([text], model=model, dimensions=dimensions)[0]
+
+
+def load_embedding_cache(path: Path) -> dict[str, list[float]]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as file:
+        payload = json.load(file)
+    vectors = payload.get("vectors", payload)
+    return {
+        str(chunk_id): [float(value) for value in vector]
+        for chunk_id, vector in vectors.items()
+    }
+
+
+def save_embedding_cache(path: Path, vectors: dict[str, list[float]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "provider": "zhipu",
+        "model": DEFAULT_ZHIPU_MODEL,
+        "dimensions": DEFAULT_ZHIPU_DIMENSIONS,
+        "created_at": int(time.time()),
+        "vectors": vectors,
+    }
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False)
+
+
+def embed_chunks(
+    chunks: list[JsonlChunk],
+    *,
+    provider: EmbeddingProvider = "fake",
+    cache_path: Path = DEFAULT_EMBEDDING_CACHE_PATH,
+    refresh_cache: bool = False,
+) -> list[EmbeddedJsonlChunk]:
+    if provider == "fake":
+        return [
+            EmbeddedJsonlChunk(chunk=chunk, vector=fake_embed_text(build_search_text(chunk)))
+            for chunk in chunks
+        ]
+    return embed_chunks_with_zhipu(chunks, cache_path=cache_path, refresh_cache=refresh_cache)
+
+
+def embed_chunks_with_zhipu(
+    chunks: list[JsonlChunk],
+    *,
+    cache_path: Path = DEFAULT_EMBEDDING_CACHE_PATH,
+    refresh_cache: bool = False,
+) -> list[EmbeddedJsonlChunk]:
+    cached_vectors = {} if refresh_cache else load_embedding_cache(cache_path)
+    missing_chunks = [chunk for chunk in chunks if chunk.id not in cached_vectors]
+
+    for start in range(0, len(missing_chunks), ZHIPU_BATCH_SIZE):
+        batch = missing_chunks[start : start + ZHIPU_BATCH_SIZE]
+        vectors = zhipu_embed_texts([build_search_text(chunk) for chunk in batch])
+        for chunk, vector in zip(batch, vectors):
+            cached_vectors[chunk.id] = vector
+
+    if missing_chunks or refresh_cache:
+        save_embedding_cache(cache_path, cached_vectors)
+
     return [
-        EmbeddedJsonlChunk(chunk=chunk, vector=fake_embed_text(build_search_text(chunk)))
+        EmbeddedJsonlChunk(chunk=chunk, vector=cached_vectors[chunk.id])
         for chunk in chunks
     ]
 
@@ -457,8 +584,13 @@ def vector_top_k(
     query: str,
     embedded_chunks: list[EmbeddedJsonlChunk],
     top_k: int,
+    embedding_provider: EmbeddingProvider = "fake",
 ) -> list[RetrievalHit]:
-    query_vector = fake_embed_text(query)
+    query_vector = (
+        fake_embed_text(query)
+        if embedding_provider == "fake"
+        else zhipu_embed_text(query)
+    )
     hits = [
         RetrievalHit(
             chunk=item.chunk,
@@ -479,11 +611,17 @@ def hybrid_top_k(
     chunks: list[JsonlChunk],
     embedded_chunks: list[EmbeddedJsonlChunk],
     top_k: int,
+    embedding_provider: EmbeddingProvider = "fake",
     keyword_weight: float = 0.7,
     vector_weight: float = 0.3,
 ) -> list[RetrievalHit]:
     keyword_hits = keyword_top_k(query, chunks, top_k=len(chunks))
-    vector_hits = vector_top_k(query, embedded_chunks, top_k=len(embedded_chunks))
+    vector_hits = vector_top_k(
+        query,
+        embedded_chunks,
+        top_k=len(embedded_chunks),
+        embedding_provider=embedding_provider,
+    )
 
     merged: dict[str, tuple[JsonlChunk, float, float]] = {}
     for hit in keyword_hits:
@@ -511,12 +649,13 @@ def retrieve_top_k(
     embedded_chunks: list[EmbeddedJsonlChunk],
     top_k: int = 3,
     mode: RetrievalMode = "hybrid",
+    embedding_provider: EmbeddingProvider = "fake",
 ) -> list[RetrievalHit]:
     if mode == "keyword":
         return keyword_top_k(query, chunks, top_k)
     if mode == "vector":
-        return vector_top_k(query, embedded_chunks, top_k)
-    return hybrid_top_k(query, chunks, embedded_chunks, top_k)
+        return vector_top_k(query, embedded_chunks, top_k, embedding_provider)
+    return hybrid_top_k(query, chunks, embedded_chunks, top_k, embedding_provider)
 
 
 def retrieve_with_diagnostics(
@@ -525,8 +664,9 @@ def retrieve_with_diagnostics(
     embedded_chunks: list[EmbeddedJsonlChunk],
     top_k: int = 3,
     mode: RetrievalMode = "hybrid",
+    embedding_provider: EmbeddingProvider = "fake",
 ) -> RetrievalResult:
-    hits = retrieve_top_k(query, chunks, embedded_chunks, top_k, mode)
+    hits = retrieve_top_k(query, chunks, embedded_chunks, top_k, mode, embedding_provider)
     diagnostics = build_diagnostics(query, hits)
     return RetrievalResult(hits=hits, diagnostics=diagnostics)
 
@@ -672,24 +812,64 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jsonl", type=Path, default=DEFAULT_JSONL_PATH)
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--mode", choices=["keyword", "vector", "hybrid"], default="hybrid")
+    parser.add_argument(
+        "--embedding-provider",
+        choices=["fake", "zhipu"],
+        default="fake",
+        help="Use fake hash vectors by default, or Zhipu embedding-3 when ZAI_API_KEY is set.",
+    )
+    parser.add_argument(
+        "--embedding-cache",
+        type=Path,
+        default=DEFAULT_EMBEDDING_CACHE_PATH,
+        help="Local cache for Zhipu chunk embeddings.",
+    )
+    parser.add_argument(
+        "--refresh-embedding-cache",
+        action="store_true",
+        help="Regenerate the Zhipu chunk embedding cache.",
+    )
+    parser.add_argument(
+        "--embedding-smoke-test",
+        action="store_true",
+        help="Only request one query embedding and print its dimension; does not embed chunks.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.embedding_smoke_test:
+        if args.embedding_provider != "zhipu":
+            print("embedding_smoke_test requires --embedding-provider zhipu")
+            return
+        vector = zhipu_embed_text(args.query)
+        print(f"embedding_provider={args.embedding_provider}")
+        print(f"query={args.query}")
+        print(f"embedding_dim={len(vector)}")
+        print(f"embedding_preview={vector[:3]}")
+        return
+
     chunks = load_jsonl_chunks(args.jsonl)
-    embedded_chunks = embed_chunks(chunks)
+    embedded_chunks = embed_chunks(
+        chunks,
+        provider=args.embedding_provider,
+        cache_path=args.embedding_cache,
+        refresh_cache=args.refresh_embedding_cache,
+    )
     result = retrieve_with_diagnostics(
         query=args.query,
         chunks=chunks,
         embedded_chunks=embedded_chunks,
         top_k=args.top_k,
         mode=args.mode,
+        embedding_provider=args.embedding_provider,
     )
 
     print(f"loaded_chunks={len(chunks)}")
     print(f"query={args.query}")
     print(f"mode={args.mode}")
+    print(f"embedding_provider={args.embedding_provider}")
     print(format_diagnostics(result.diagnostics))
     for index, hit in enumerate(result.hits, start=1):
         print(format_hit(index, hit))

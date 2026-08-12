@@ -6,3 +6,4 @@ venv/
 .env.*
 *.log
 .ipynb_checkpoints/
+data/*embeddings*.json
