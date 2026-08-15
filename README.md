@@ -183,19 +183,47 @@ curl -X POST http://127.0.0.1:8000/rag/query `
 
 ## Docker 状态
 
-当前虚拟机环境已安装 Docker，但仓库中的 `Dockerfile` 仍指向早期 `ai14_agent_api.py` demo：
-
-```dockerfile
-CMD ["uvicorn", "ai14_agent_api:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-因此，Docker 目前只能作为早期 Agent API demo 的运行方式，尚不能代表最新的 `ai21_bagu_rag_api.py` 八股 RAG 接口。后续如果要把 Docker 作为展示路径，需要先更新 `Dockerfile`，复制 `ai17` 到 `ai21`、`data/` 和 `八股文.md`，并将启动命令切换为：
+当前 `Dockerfile` 已切换到最新的 `ai21_bagu_rag_api.py` 八股 RAG 接口，会复制 `ai17` 到 `ai21`、`data/` 和 `八股文.md`，并通过 Uvicorn 暴露 `8000` 端口：
 
 ```dockerfile
 CMD ["uvicorn", "ai21_bagu_rag_api:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-在完成这一步之前，本项目默认运行方式仍是本地 Python + FastAPI。
+在虚拟机或 Linux 环境中构建：
+
+```bash
+docker build -t searchengine-ai-api .
+```
+
+`Dockerfile` 默认使用 `docker.m.daocloud.io/python:3.11-slim`，用于适配当前虚拟机网络环境。如果你的环境可以直接访问 Docker Hub，可以切回官方镜像：
+
+```bash
+docker build --build-arg PYTHON_IMAGE=python:3.11-slim -t searchengine-ai-api .
+```
+
+无 key 环境下可以先验证健康检查和检索摘要路径：
+
+```bash
+docker run --rm -p 8000:8000 --name searchengine-ai-api searchengine-ai-api
+
+curl http://127.0.0.1:8000/health
+
+curl -X POST http://127.0.0.1:8000/rag/query \
+  -H "Content-Type: application/json" \
+  -d '{"query":"epoll 水平触发和边缘触发有什么区别","top_k":3,"mode":"hybrid","embedding_provider":"fake","use_glm":false}'
+```
+
+如果要在 Docker 中调用真实 embedding 或 GLM，需要运行容器时显式注入环境变量：
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e ZAI_API_KEY="$ZAI_API_KEY" \
+  -e ZAI_GLM_MODEL="glm-4-flash" \
+  --name searchengine-ai-api \
+  searchengine-ai-api
+```
+
+不要把 `.env` 或 API key 打进镜像；`.dockerignore` 已排除 `.env`、`.env.*`、日志和 embedding 缓存。
 
 ## 成本与安全边界
 
@@ -213,14 +241,4 @@ CMD ["uvicorn", "ai21_bagu_rag_api:app", "--host", "0.0.0.0", "--port", "8000"]
 - fake embedding 只能用于流程验证，真实召回质量需要用 Zhipu embedding 或本地 embedding 模型验证。
 - knowledge gap 依赖启发式规则，可能误判相近概念或冷门问法。
 - GLM 回答依赖外部 API，可用性、耗时和成本都受外部服务影响。
-- Docker 尚未更新到最新 RAG API，不应作为当前主展示路径。
-
-## 面试表达
-
-这个项目可以这样讲：
-
-> 我做了一个面向 C++ 后端面试资料的本地知识库 RAG 后端原型。它先把 Markdown 八股资料解析成带标题路径、行号和 chunk 类型的 JSONL，然后支持关键词、向量和混合检索。检索阶段会输出核心词匹配、缺失词、Top1 分数和 knowledge gap 判断，避免在资料不匹配时强行让模型回答。回答层把 TopK 来源拼成 RAG prompt 调 GLM，如果没有 key、检索为空或疑似知识库缺口，就降级成检索摘要。最后用 FastAPI 暴露 `/rag/query`，并在接口层做同参 LRU 缓存，减少重复请求成本。
-
-边界也要说清楚：
-
-> 这个项目是学习型工程原型，不是生产级知识库平台。它的价值在于把文档解析、检索召回、诊断、LLM 回答、接口封装、缓存和降级串成闭环；不足是数据规模、评估集、权限隔离、限流和 Docker 部署还没有做到生产级。
+- Docker 已能启动当前 RAG API，但还没有加入健康检查、非 root 用户、生产级进程管理和多环境配置。
