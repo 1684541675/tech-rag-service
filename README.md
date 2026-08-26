@@ -7,6 +7,7 @@
 ## 当前能力
 
 - 从 Markdown 八股资料中解析标题、正文、代码块和行号信息，生成 JSONL chunks。
+- 支持按真实 tokenizer 的 token 预算切分正文，并保留可配置的 token overlap。
 - 基于 JSONL chunks 跑通 keyword / vector / hybrid 三种 TopK 召回。
 - 支持 fake embedding 和 Zhipu `embedding-3`，方便在无 key 环境下先验证链路。
 - 对召回结果输出 diagnostics，包括 query tokens、核心词、缺失词、Top1 分数和可能的 knowledge gap。
@@ -38,6 +39,7 @@
 | `ai19_retrieval_eval.py` | 基于固定 eval set 检查召回结果和 knowledge gap 判断 |
 | `ai20_glm_rag_answer.py` | GLM RAG 回答层，负责 prompt、sources、usage、降级和耗时拆分 |
 | `ai21_bagu_rag_api.py` | 当前八股 RAG FastAPI 接口，提供 `/health`、`/rag/query`、`/agent/query` |
+| `ai22_token_chunking.py` | 用 `tiktoken` 按 token 上限切分 Markdown 正文，可配置 overlap，并保持 ai17 的 JSONL schema |
 | `data/bagu_chunks.jsonl` | 由 Markdown ingestion 生成的知识库 chunks |
 | `data/bagu_retrieval_eval_v0.jsonl` | 检索评估样例 |
 | `Dockerfile` | 早期 `ai14_agent_api.py` demo 的 Docker 配置，尚未更新到 `ai21_bagu_rag_api.py` |
@@ -72,6 +74,16 @@ $env:ZAI_GLM_MODEL="glm-4-flash"
 ```powershell
 python ai17_markdown_ingestion.py
 ```
+
+## Token 预算切分（AI22）
+
+当需要让 chunk 尺寸更贴近模型上下文而不是字符数时，可以生成一份独立的 token-budget 版本：
+
+```powershell
+python ai22_token_chunking.py --max-tokens 450 --overlap-tokens 60
+```
+
+默认输出为 `data/bagu_chunks_token.jsonl`，可通过 `--input`、`--output` 和 `--encoding` 覆盖。正文优先按句子边界切分，单句过长时才按 token 强制切开；表格和 fenced code block 会整体保留，以避免破坏结构，因此它们可能超过正文的 token 上限。
 
 ## 检索验证
 
