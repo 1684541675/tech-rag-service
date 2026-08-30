@@ -37,9 +37,11 @@ class RevisionBuildJob:
     """Persist a complete new revision, validate it, then publish atomically."""
 
     def __init__(self, *, store: RevisionStore, chunker: Chunker,
+                 before_publish: Callable[[ParentChildChunks, DocumentRevision], None] | None = None,
                  id_factory: Callable[[], str] | None = None) -> None:
         self.store = store
         self.chunker = chunker
+        self.before_publish = before_publish
         self.id_factory = id_factory or (lambda: str(uuid.uuid4()))
 
     def build(self, markdown: str, *, source_uri: str) -> BuildResult:
@@ -59,6 +61,8 @@ class RevisionBuildJob:
             self.store.save_chunks(chunks.parents + chunks.children)
             revision.transition_to(RevisionStatus.VALIDATING); self.store.save_status(revision)
             self._validate(chunks, revision.id)
+            if self.before_publish:
+                self.before_publish(chunks, revision)
             revision.transition_to(RevisionStatus.READY)
             self.store.publish(document, revision)
             return BuildResult(document, revision, True)
