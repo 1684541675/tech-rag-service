@@ -12,8 +12,8 @@ from opensearchpy import OpenSearch
 from qdrant_client import QdrantClient
 
 from rag_core.embedding import CachingEmbedder, ZhipuEmbeddingModel
-from rag_core.ingestion import stable_content_hash
-from rag_core.retrieval import rrf_fuse
+from rag_core.ingestion import ChunkRole, IngestedChunk, stable_content_hash
+from rag_core.retrieval import EvidenceGate, HybridRetrievalResult, ParentWindowRetriever, rrf_fuse
 from rag_core.stores import OpenSearchBM25Store, PostgresEmbeddingCache, QdrantVectorStore
 from scripts.run_real_bagu_core import OPENSEARCH_INDEX, QDRANT_COLLECTION, load_dotenv
 
@@ -47,6 +47,21 @@ def summarize(rows: list[dict], method: str) -> dict[str, float | int]:
     }
 
 
+def summarize_evidence(rows: list[dict]) -> dict[str, object]:
+    positives = [row for row in rows if row["should_find"]]
+    gaps = [row for row in rows if not row["should_find"]]
+    allowed = [row for row in rows if row["evidence"]["sufficient"]]
+    return {
+        "positive_cases": len(positives),
+        "gap_cases": len(gaps),
+        "positive_pass_rate": round(sum(row["evidence"]["sufficient"] for row in positives) / len(positives), 4),
+        "gap_refusal_rate": round(sum(not row["evidence"]["sufficient"] for row in gaps) / len(gaps), 4),
+        "false_reject_ids": [row["id"] for row in positives if not row["evidence"]["sufficient"]],
+        "false_allow_ids": [row["id"] for row in gaps if row["evidence"]["sufficient"]],
+        "allowed_cases": len(allowed),
+    }
+
+
 def main() -> None:
     load_dotenv()
     cases = [json.loads(line) for line in EVAL_PATH.read_text(encoding="utf-8").splitlines() if line]
@@ -54,17 +69,27 @@ def main() -> None:
     with connection.cursor() as cur:
         cur.execute("SELECT active_revision_id FROM documents WHERE active_revision_id IS NOT NULL")
         revision_id = str(cur.fetchone()[0])
+        cur.execute("SELECT id,role,parent_chunk_id,ordinal,content,content_hash,token_count,tokenizer_name,heading_path,source_uri,line_start,line_end FROM document_chunks WHERE revision_id=%s ORDER BY ordinal", (revision_id,))
+        chunks = [IngestedChunk(str(r[0]), revision_id, ChunkRole(r[1]), str(r[2]) if r[2] else None, r[3], r[4], r[5], r[6], r[7], tuple(r[8]), r[9], r[10], r[11]) for r in cur.fetchall()]
     if any(case["revision_id"] != revision_id for case in cases):
         raise RuntimeError("eval set revision does not match active revision; rebuild the eval set")
     sparse = OpenSearchBM25Store(client=OpenSearch(hosts=[{"host":"localhost","port":9200,"scheme":"http"}]), index_name=OPENSEARCH_INDEX)
     dense = QdrantVectorStore(client=QdrantClient(url="http://localhost:6333"), collection_name=QDRANT_COLLECTION)
     embedder = CachingEmbedder(model=ZhipuEmbeddingModel(), cache=PostgresEmbeddingCache(connection))
+    parent_windows = ParentWindowRetriever(
+        parents=[chunk for chunk in chunks if chunk.role is ChunkRole.PARENT],
+        children=[chunk for chunk in chunks if chunk.role is ChunkRole.CHILD],
+    )
+    evidence_gate = EvidenceGate()
     results = []
     for number, case in enumerate(cases, 1):
         vector, cache_hit = embedder.embed(content_hash=stable_content_hash(case["query"]), text=case["query"])
         sparse_hits = sparse.search(query_text=case["query"], revision_id=revision_id, limit=TOP_K)
         dense_hits = dense.search(query_vector=vector, revision_id=revision_id, limit=TOP_K)
-        rrf_hits = rrf_fuse({"sparse": sparse_hits, "dense": dense_hits}, revision_id=revision_id, limit=TOP_K)
+        rrf_candidates = rrf_fuse({"sparse": sparse_hits, "dense": dense_hits}, revision_id=revision_id, limit=TOP_K * 2)
+        rrf_hits = rrf_candidates[:TOP_K]
+        windows = parent_windows.fetch(rrf_candidates, limit=3)
+        evidence = evidence_gate.assess(retrieval=HybridRetrievalResult(rrf_candidates, ()), windows=windows)
         expected = set(case["expected_child_ids"])
         ids = {"bm25": [hit.chunk_id for hit in sparse_hits], "dense": [hit.chunk_id for hit in dense_hits], "rrf": [hit.chunk_id for hit in rrf_hits]}
         record = {**case, "query_embedding_cache_hit": cache_hit, "rankings": ids,
@@ -72,6 +97,13 @@ def main() -> None:
                   "ndcg": {name: {str(k): round(ndcg(values, expected, k), 4) for k in (3, 5)} for name, values in ids.items()}}
         # Gap heuristic only: no Top-5 candidate appears in both retrievers.
         record["gap_predicted_heuristic"] = not any(len(hit.source_ranks) == 2 for hit in rrf_hits)
+        record["evidence"] = {
+            "sufficient": evidence.sufficient,
+            "reason": evidence.reason,
+            "max_dense_score": evidence.max_dense_score,
+            "fused_hit_count": evidence.fused_hit_count,
+            "window_count": evidence.window_count,
+        }
         results.append(record)
         print(f"evaluated={number}/{len(cases)} id={case['id']} cache_hit={cache_hit}", flush=True)
     RESULT_PATH.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in results) + "\n", encoding="utf-8")
@@ -79,6 +111,9 @@ def main() -> None:
         print(f"[{method}] {json.dumps(summarize(results, method), ensure_ascii=False)}")
     gaps = [row for row in results if not row["should_find"]]
     print("[gap_heuristic] " + json.dumps({"cases": len(gaps), "recall": round(sum(row['gap_predicted_heuristic'] for row in gaps) / len(gaps), 4)}, ensure_ascii=False))
+    print("[evidence_gate] " + json.dumps(summarize_evidence(results), ensure_ascii=False))
+    for split in sorted({row["split"] for row in results}):
+        print(f"[evidence_gate:{split}] " + json.dumps(summarize_evidence([row for row in results if row["split"] == split]), ensure_ascii=False))
 
 
 if __name__ == "__main__": main()

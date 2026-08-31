@@ -18,7 +18,7 @@ from rag_core.embedding import CachingEmbedder, ZhipuEmbeddingModel
 from rag_core.generation import RagAnswerService, TokenBudgeter, ZhipuChatClient
 from rag_core.indexing.revision_build import RevisionBuildJob
 from rag_core.ingestion import ParentChildMarkdownChunker, TiktokenTokenizer
-from rag_core.retrieval import ParallelHybridRetriever, ParentWindowRetriever
+from rag_core.retrieval import EvidenceGate, ParallelHybridRetriever, ParentWindowRetriever
 from rag_core.stores import (KeywordRecord, OpenSearchBM25Store, PostgresEmbeddingCache,
                              PostgresRevisionStore, QdrantVectorStore, VectorRecord)
 
@@ -75,10 +75,12 @@ def main() -> None:
     hybrid = ParallelHybridRetriever(
         sparse_search=lambda: keyword.search(query_text="epoll 边缘触发为什么读到 EAGAIN", revision_id=revision, limit=5),
         dense_search=lambda: vector.search(query_vector=embedder.embed(content_hash="query-epoll-eagain-v1", text="epoll 边缘触发为什么读到 EAGAIN")[0], revision_id=revision, limit=5),
-    ).retrieve(revision_id=revision, limit=4)
+    ).retrieve(revision_id=revision, limit=6)
     windows = ParentWindowRetriever(parents=chunks.parents, children=chunks.children).fetch(hybrid.hits, limit=3)
-    answer = RagAnswerService(budgeter=TokenBudgeter(chunker.tokenizer), chat_client=ZhipuChatClient()).answer(query="epoll 边缘触发时为什么必须读到 EAGAIN？", windows=windows)
+    evidence = EvidenceGate().assess(retrieval=hybrid, windows=windows)
+    answer = RagAnswerService(budgeter=TokenBudgeter(chunker.tokenizer), chat_client=ZhipuChatClient()).answer(query="epoll 边缘触发时为什么必须读到 EAGAIN？", windows=windows, evidence=evidence)
     print(f"published=true revision={revision} fused_hits={len(hybrid.hits)} windows={len(windows)}")
+    print(f"evidence={evidence.reason} max_dense_score={evidence.max_dense_score}")
     print(f"status={answer.status} degraded={answer.degraded} citations={len(answer.citations)}")
     print(answer.answer)
 

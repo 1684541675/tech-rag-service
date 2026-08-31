@@ -14,6 +14,7 @@ class FusedHit:
     revision_id: str
     rrf_score: float
     source_ranks: tuple[tuple[str, int], ...]
+    source_scores: tuple[tuple[str, float], ...]
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ def rrf_fuse(ranked_results: Mapping[str, Sequence[object]], *, revision_id: str
         raise ValueError("rank_constant must be positive")
     scores: dict[str, float] = {}
     ranks: dict[str, list[tuple[str, int]]] = {}
+    source_scores: dict[str, list[tuple[str, float]]] = {}
     for source, hits in ranked_results.items():
         seen: set[str] = set()
         for rank, hit in enumerate(hits, 1):
@@ -50,8 +52,18 @@ def rrf_fuse(ranked_results: Mapping[str, Sequence[object]], *, revision_id: str
             seen.add(chunk_id)
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (rank_constant + rank)
             ranks.setdefault(chunk_id, []).append((source, rank))
+            source_scores.setdefault(chunk_id, []).append((source, float(getattr(hit, "score"))))
     ordered = sorted(scores, key=lambda chunk_id: (-scores[chunk_id], chunk_id))[:limit]
-    return tuple(FusedHit(chunk_id, revision_id, scores[chunk_id], tuple(sorted(ranks[chunk_id]))) for chunk_id in ordered)
+    return tuple(
+        FusedHit(
+            chunk_id,
+            revision_id,
+            scores[chunk_id],
+            tuple(sorted(ranks[chunk_id])),
+            tuple(sorted(source_scores[chunk_id])),
+        )
+        for chunk_id in ordered
+    )
 
 
 class ParallelHybridRetriever:

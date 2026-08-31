@@ -1,7 +1,7 @@
 import unittest
 
 from rag_core.ingestion import ParentChildMarkdownChunker
-from rag_core.retrieval import ParallelHybridRetriever, ParentWindowRetriever, rrf_fuse
+from rag_core.retrieval import EvidenceGate, HybridRetrievalResult, ParallelHybridRetriever, ParentWindowRetriever, rrf_fuse
 from rag_core.stores import KeywordHit, VectorHit
 
 
@@ -43,6 +43,21 @@ class HybridRetrievalTest(unittest.TestCase):
         self.assertEqual(windows[0].matched_child_ids, (chunks.children[1].id, chunks.children[2].id))
         self.assertIn(chunks.children[0].id, windows[0].window_child_ids)
         self.assertIn(chunks.children[3].id, windows[0].window_child_ids)
+
+    def test_evidence_gate_rejects_weak_dense_context(self):
+        chunks = ParentChildMarkdownChunker(tokenizer=CharacterTokenizer(), parent_max_tokens=2000, child_max_tokens=30).chunk("# Backend\n\n" + "context " * 30, revision_id="rev-1", source_uri="fixture.md")
+        hit = rrf_fuse({"dense": [VectorHit(chunks.children[0].id, "rev-1", 0.65)]}, revision_id="rev-1", limit=1)
+        windows = ParentWindowRetriever(parents=chunks.parents, children=chunks.children).fetch(hit)
+        decision = EvidenceGate(min_dense_score=0.71).assess(retrieval=HybridRetrievalResult(hit, ()), windows=windows)
+        self.assertFalse(decision.sufficient)
+        self.assertEqual(decision.reason, "dense_score_below_threshold")
+
+    def test_evidence_gate_allows_strong_dense_context(self):
+        chunks = ParentChildMarkdownChunker(tokenizer=CharacterTokenizer(), parent_max_tokens=2000, child_max_tokens=30).chunk("# Backend\n\n" + "context " * 30, revision_id="rev-1", source_uri="fixture.md")
+        hit = rrf_fuse({"dense": [VectorHit(chunks.children[0].id, "rev-1", 0.8)]}, revision_id="rev-1", limit=1)
+        windows = ParentWindowRetriever(parents=chunks.parents, children=chunks.children).fetch(hit)
+        decision = EvidenceGate(min_dense_score=0.71).assess(retrieval=HybridRetrievalResult(hit, ()), windows=windows)
+        self.assertTrue(decision.sufficient)
 
 
 if __name__ == "__main__": unittest.main()

@@ -1,13 +1,13 @@
 """FastAPI protocol layer; retrieval orchestration remains injected."""
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from typing import Callable
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator
 
 from rag_core.generation import RagAnswerService
-from rag_core.retrieval import ParentWindow
+from rag_core.retrieval import RetrievedContext
 
 
 class QueryRequest(BaseModel):
@@ -24,7 +24,7 @@ class QueryRequest(BaseModel):
         return value
 
 
-def create_app(*, answer_service: RagAnswerService, retrieve_windows: Callable[[str], Sequence[ParentWindow]]) -> FastAPI:
+def create_app(*, answer_service: RagAnswerService, retrieve_context: Callable[[str], RetrievedContext]) -> FastAPI:
     app = FastAPI(title="tech-rag-core", version="0.1.0")
 
     @app.get("/health")
@@ -33,7 +33,7 @@ def create_app(*, answer_service: RagAnswerService, retrieve_windows: Callable[[
 
     @app.post("/rag/query")
     def query(request: QueryRequest) -> dict[str, object]:
-        windows = retrieve_windows(request.query)
-        return answer_service.answer(query=request.query, windows=windows, context_token_budget=request.context_token_budget, max_tokens=request.max_tokens).to_dict()
+        context = retrieve_context(request.query)
+        return answer_service.answer(query=request.query, windows=context.windows, evidence=context.evidence, context_token_budget=request.context_token_budget, max_tokens=request.max_tokens).to_dict()
 
     return app

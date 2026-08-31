@@ -1,6 +1,82 @@
-# SearchEngine AI Lab
+# Tech RAG Service
 
-面向 C++ 后端面试资料的本地半结构化知识库 RAG 后端原型。
+面向 C++ 后端面试资料的版本化 RAG Core；它是学习型、可验证的工程原型，不是生产级知识库或通用 Agent 平台。
+
+> 说明：本 README 前半部分描述当前 `rag_core/` 主线；后半部分的 `ai17` 至 `ai21` 内容保留为早期学习原型，不能与当前 RAG Core 的能力或部署方式混用。
+
+## 当前 AI-25 RAG Core
+
+当前主线以 `rag_core/` 和 `scripts/` 为准，真实语料为根目录 `八股文.md`。当前 active revision 含 337 个 parent chunks 与 961 个 child chunks。
+
+```text
+八股文.md
+  -> Markdown parent/child chunking
+  -> PostgreSQL: revision + chunks + embedding cache
+  -> OpenSearch: child BM25 index
+  -> embedding-3 -> Qdrant: child vectors
+  -> 校验成功后切换 active_revision_id
+
+查询 -> BM25 + Dense 并行召回 -> RRF -> parent context window
+     -> evidence gate -> GLM answer + citation / no_knowledge
+```
+
+核心事实：所有 OpenSearch/Qdrant 查询都强制带 `revision_id` filter；外部索引和校验完成前不会切换 active revision。RRF 只融合名次，不直接混加 BM25 与 cosine 原始分数。
+
+### 当前入口
+
+| 路径 | 用途 |
+|---|---|
+| `rag_core/ingestion/` | Markdown 解析、token 切分、parent/child chunks |
+| `rag_core/indexing/` | revision build 与发布屏障 |
+| `rag_core/stores/` | PostgreSQL、OpenSearch、Qdrant 适配器 |
+| `rag_core/retrieval/` | 并行召回、RRF、parent window、evidence gate |
+| `rag_core/generation/` | token 预算、GLM、citation |
+| `migrations/` | PostgreSQL schema 初始化与演进 |
+| `scripts/run_real_bagu_core.py` | 新建并发布 revision；会写索引并可能调用 API |
+| `scripts/query_active_bagu_core.py` | 查询当前 active revision，不重新导入文档 |
+| `scripts/evaluate_ai25_retrieval.py` | 检索与 evidence gate 回归 |
+
+### 首次准备
+
+1. 启动本机 PostgreSQL 数据库 `tech_rag`，并执行一次 `migrations/0001_rag_core_initial.sql`、`0002_rag_core_chunks.sql`、`0003_embedding_cache.sql`。
+2. 启动 Qdrant 和 OpenSearch：
+
+```powershell
+docker start tech-rag-qdrant
+docker compose -f docker-compose.opensearch.yml up -d
+```
+
+3. 准备 `.env`（Git 忽略）中的 `RAG_TEST_DATABASE_DSN` 与 `ZAI_API_KEY`。密钥不得提交。
+
+### 导入、查询与验证
+
+```powershell
+cd D:\code\Python\ai
+
+# 仅在首次导入或八股文.md 更新后运行：创建并发布新 revision
+.\.venv\Scripts\python.exe -m scripts.run_real_bagu_core
+
+# 日常查询当前 active revision：不重建索引
+.\.venv\Scripts\python.exe -m scripts.query_active_bagu_core "epoll 边缘触发时为什么必须读到 EAGAIN？"
+
+# 离线单元测试
+.\.venv\Scripts\python.exe -m unittest discover -s tests\unit -v
+
+# revision-bound 检索与 evidence gate 回归
+.\.venv\Scripts\python.exe -m scripts.build_ai25_eval
+.\.venv\Scripts\python.exe -m scripts.evaluate_ai25_retrieval
+```
+
+真实 embedding/GLM 会将查询或检索上下文发送至配置的智谱 API，可能产生费用。评测集用于回归与发现失败边界，不用于反复调固定题目分数。
+
+### 已知边界
+
+- 首版 evidence gate 会在部分证据不足时返回 `no_knowledge`，但不是可靠防幻觉保证。
+- 已验证的 MongoDB 缺口题曾被误放行，并携带无关的 MySQL citation；因此不能声称 citation 总能支撑回答。
+- 当前没有多租户、认证、限流、审计、生产部署编排或高并发承诺。
+- 根目录 `Dockerfile` 仍用于早期 `ai21_bagu_rag_api.py` 原型，不是当前 AI-25 RAG Core 的端到端容器化部署。
+
+## 早期 ai17–ai21 学习原型
 
 这个仓库用于把传统检索、向量召回、RAG 回答层和后端接口串成一个小而完整的学习型工程闭环。当前重点不是做通用企业知识库平台，而是围绕 C++ 后端面试资料，展示 Markdown 资料解析、检索诊断、LLM 回答、接口缓存和降级边界。
 

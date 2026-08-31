@@ -12,7 +12,7 @@ from qdrant_client import QdrantClient
 from rag_core.embedding import CachingEmbedder, ZhipuEmbeddingModel
 from rag_core.generation import RagAnswerService, TokenBudgeter, ZhipuChatClient
 from rag_core.ingestion import ChunkRole, IngestedChunk, TiktokenTokenizer, stable_content_hash
-from rag_core.retrieval import ParallelHybridRetriever, ParentWindowRetriever
+from rag_core.retrieval import EvidenceGate, ParallelHybridRetriever, ParentWindowRetriever
 from rag_core.stores import OpenSearchBM25Store, PostgresEmbeddingCache, QdrantVectorStore
 from scripts.run_real_bagu_core import OPENSEARCH_INDEX, QDRANT_COLLECTION, SOURCE, load_dotenv
 
@@ -39,12 +39,14 @@ def main() -> None:
     result = ParallelHybridRetriever(
         sparse_search=lambda: keyword.search(query_text=query, revision_id=revision_id, limit=6),
         dense_search=lambda: vector.search(query_vector=query_vector, revision_id=revision_id, limit=6),
-    ).retrieve(revision_id=revision_id, limit=4)
+    ).retrieve(revision_id=revision_id, limit=6)
     windows = ParentWindowRetriever(parents=parents, children=children).fetch(result.hits, limit=3)
-    answer = RagAnswerService(budgeter=TokenBudgeter(tokenizer), chat_client=ZhipuChatClient()).answer(query=query, windows=windows)
+    evidence = EvidenceGate().assess(retrieval=result, windows=windows)
+    answer = RagAnswerService(budgeter=TokenBudgeter(tokenizer), chat_client=ZhipuChatClient()).answer(query=query, windows=windows, evidence=evidence)
     print(f"revision={revision_id} query_embedding_cache_hit={cache_hit}")
     print(f"fused_hits={[(hit.chunk_id, round(hit.rrf_score, 4), hit.source_ranks) for hit in result.hits]}")
     print(f"windows={[(w.parent.heading_path, w.parent.line_start, w.parent.line_end) for w in windows]}")
+    print(f"evidence={evidence.reason} max_dense_score={evidence.max_dense_score}")
     print(f"status={answer.status} degraded={answer.degraded} citations={[(c.heading_path,c.line_start,c.line_end) for c in answer.citations]}")
     print(answer.answer)
 

@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Callable, Protocol, Sequence
 
 from rag_core.ingestion.markdown import Tokenizer
-from rag_core.retrieval import ParentWindow
+from rag_core.retrieval import EvidenceDecision, ParentWindow
 
 ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
@@ -105,9 +105,13 @@ class RagAnswerService:
     def __init__(self, *, budgeter: TokenBudgeter, chat_client: ChatClient, model: str = "glm-4-flash") -> None:
         self.budgeter, self.chat_client, self.model = budgeter, chat_client, model
 
-    def answer(self, *, query: str, windows: Sequence[ParentWindow], context_token_budget: int = 1200, max_tokens: int = 600) -> RagAnswer:
+    def answer(self, *, query: str, windows: Sequence[ParentWindow], evidence: EvidenceDecision | None = None, context_token_budget: int = 1200, max_tokens: int = 600) -> RagAnswer:
         if not query.strip():
             raise ValueError("query must not be empty")
+        if evidence is None:
+            return RagAnswer("当前请求尚未完成证据评估，不能生成回答。", "no_knowledge", True, "evidence_not_assessed", None, (), 0)
+        if not evidence.sufficient:
+            return RagAnswer("当前知识库没有足够的可引用资料来回答这个问题。", "no_knowledge", True, evidence.reason, None, (), 0)
         blocks = self.budgeter.select(windows, token_budget=context_token_budget)
         citations = tuple(block.citation for block in blocks)
         if not blocks:
