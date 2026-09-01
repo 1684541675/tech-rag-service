@@ -12,13 +12,13 @@ from qdrant_client import QdrantClient
 from rag_core.embedding import CachingEmbedder, ZhipuEmbeddingModel
 from rag_core.generation import RagAnswerService, TokenBudgeter, ZhipuChatClient
 from rag_core.ingestion import ChunkRole, IngestedChunk, TiktokenTokenizer, stable_content_hash
-from rag_core.retrieval import EvidenceGate, ParallelHybridRetriever, ParentWindowRetriever
+from rag_core.retrieval import EvidenceGate, ParallelHybridRetriever, ParentWindowRetriever, RetrievedContext
 from rag_core.stores import OpenSearchBM25Store, PostgresEmbeddingCache, QdrantVectorStore
 from scripts.run_real_bagu_core import OPENSEARCH_INDEX, QDRANT_COLLECTION, SOURCE, load_dotenv
 
 
-def main() -> None:
-    query = sys.argv[1] if len(sys.argv) > 1 else "epoll 边缘触发时为什么必须读到 EAGAIN？"
+def build_active_retrieve_context():
+    """Build the existing active-revision query boundary for callers to inject."""
     load_dotenv()
     connection = psycopg.connect(os.environ["RAG_TEST_DATABASE_DSN"])
     with connection.cursor() as cur:
@@ -35,16 +35,27 @@ def main() -> None:
     embedder = CachingEmbedder(model=ZhipuEmbeddingModel(), cache=PostgresEmbeddingCache(connection))
     keyword = OpenSearchBM25Store(client=OpenSearch(hosts=[{"host":"localhost","port":9200,"scheme":"http"}]), index_name=OPENSEARCH_INDEX)
     vector = QdrantVectorStore(client=QdrantClient(url="http://localhost:6333"), collection_name=QDRANT_COLLECTION)
-    query_vector, cache_hit = embedder.embed(content_hash=stable_content_hash(query), text=query)
-    result = ParallelHybridRetriever(
-        sparse_search=lambda: keyword.search(query_text=query, revision_id=revision_id, limit=6),
-        dense_search=lambda: vector.search(query_vector=query_vector, revision_id=revision_id, limit=6),
-    ).retrieve(revision_id=revision_id, limit=6)
-    windows = ParentWindowRetriever(parents=parents, children=children).fetch(result.hits, limit=3)
-    evidence = EvidenceGate().assess(retrieval=result, windows=windows)
+
+    def retrieve_context(query: str) -> RetrievedContext:
+        query_vector, _ = embedder.embed(content_hash=stable_content_hash(query), text=query)
+        result = ParallelHybridRetriever(
+            sparse_search=lambda: keyword.search(query_text=query, revision_id=revision_id, limit=6),
+            dense_search=lambda: vector.search(query_vector=query_vector, revision_id=revision_id, limit=6),
+        ).retrieve(revision_id=revision_id, limit=6)
+        windows = ParentWindowRetriever(parents=parents, children=children).fetch(result.hits, limit=3)
+        evidence = EvidenceGate().assess(retrieval=result, windows=windows, query=query)
+        return RetrievedContext(windows, evidence)
+
+    return retrieve_context
+
+
+def main() -> None:
+    query = sys.argv[1] if len(sys.argv) > 1 else "epoll 边缘触发时为什么必须读到 EAGAIN？"
+    retrieve_context = build_active_retrieve_context()
+    context = retrieve_context(query)
+    windows, evidence = context.windows, context.evidence
+    tokenizer = TiktokenTokenizer()
     answer = RagAnswerService(budgeter=TokenBudgeter(tokenizer), chat_client=ZhipuChatClient()).answer(query=query, windows=windows, evidence=evidence)
-    print(f"revision={revision_id} query_embedding_cache_hit={cache_hit}")
-    print(f"fused_hits={[(hit.chunk_id, round(hit.rrf_score, 4), hit.source_ranks) for hit in result.hits]}")
     print(f"windows={[(w.parent.heading_path, w.parent.line_start, w.parent.line_end) for w in windows]}")
     print(f"evidence={evidence.reason} max_dense_score={evidence.max_dense_score}")
     print(f"status={answer.status} degraded={answer.degraded} citations={[(c.heading_path,c.line_start,c.line_end) for c in answer.citations]}")

@@ -7,3 +7,4 @@ venv/
 *.log
 .ipynb_checkpoints/
 data/*embeddings*.json
+data/mastery_updates.jsonl

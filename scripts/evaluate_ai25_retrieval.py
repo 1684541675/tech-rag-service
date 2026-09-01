@@ -89,7 +89,7 @@ def main() -> None:
         rrf_candidates = rrf_fuse({"sparse": sparse_hits, "dense": dense_hits}, revision_id=revision_id, limit=TOP_K * 2)
         rrf_hits = rrf_candidates[:TOP_K]
         windows = parent_windows.fetch(rrf_candidates, limit=3)
-        evidence = evidence_gate.assess(retrieval=HybridRetrievalResult(rrf_candidates, ()), windows=windows)
+        evidence = evidence_gate.assess(retrieval=HybridRetrievalResult(rrf_candidates, ()), windows=windows, query=case["query"])
         expected = set(case["expected_child_ids"])
         ids = {"bm25": [hit.chunk_id for hit in sparse_hits], "dense": [hit.chunk_id for hit in dense_hits], "rrf": [hit.chunk_id for hit in rrf_hits]}
         record = {**case, "query_embedding_cache_hit": cache_hit, "rankings": ids,

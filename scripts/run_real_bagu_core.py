@@ -77,7 +77,7 @@ def main() -> None:
         dense_search=lambda: vector.search(query_vector=embedder.embed(content_hash="query-epoll-eagain-v1", text="epoll 边缘触发为什么读到 EAGAIN")[0], revision_id=revision, limit=5),
     ).retrieve(revision_id=revision, limit=6)
     windows = ParentWindowRetriever(parents=chunks.parents, children=chunks.children).fetch(hybrid.hits, limit=3)
-    evidence = EvidenceGate().assess(retrieval=hybrid, windows=windows)
+    evidence = EvidenceGate().assess(retrieval=hybrid, windows=windows, query="epoll 边缘触发时为什么必须读到 EAGAIN？")
     answer = RagAnswerService(budgeter=TokenBudgeter(chunker.tokenizer), chat_client=ZhipuChatClient()).answer(query="epoll 边缘触发时为什么必须读到 EAGAIN？", windows=windows, evidence=evidence)
     print(f"published=true revision={revision} fused_hits={len(hybrid.hits)} windows={len(windows)}")
     print(f"evidence={evidence.reason} max_dense_score={evidence.max_dense_score}")

@@ -59,5 +59,35 @@ class HybridRetrievalTest(unittest.TestCase):
         decision = EvidenceGate(min_dense_score=0.71).assess(retrieval=HybridRetrievalResult(hit, ()), windows=windows)
         self.assertTrue(decision.sufficient)
 
+    def test_evidence_gate_rejects_high_score_when_explicit_technical_anchor_is_absent(self):
+        chunks = ParentChildMarkdownChunker(tokenizer=CharacterTokenizer(), parent_max_tokens=2000, child_max_tokens=30).chunk("# MySQL ACID\n\ntransaction consistency " * 12, revision_id="rev-1", source_uri="fixture.md")
+        hit = rrf_fuse({"dense": [VectorHit(chunks.children[0].id, "rev-1", 0.80)]}, revision_id="rev-1", limit=1)
+        windows = ParentWindowRetriever(parents=chunks.parents, children=chunks.children).fetch(hit)
+        decision = EvidenceGate(min_dense_score=0.71).assess(retrieval=HybridRetrievalResult(hit, ()), windows=windows, query="MongoDB change stream 怎么保证一致性？")
+        self.assertFalse(decision.sufficient)
+        self.assertEqual(decision.reason, "query_anchor_missing")
+
+    def test_evidence_gate_keeps_high_score_when_technical_anchor_is_present(self):
+        chunks = ParentChildMarkdownChunker(tokenizer=CharacterTokenizer(), parent_max_tokens=2000, child_max_tokens=30).chunk("# epoll\n\nedge triggered event loop " * 12, revision_id="rev-1", source_uri="fixture.md")
+        hit = rrf_fuse({"dense": [VectorHit(chunks.children[0].id, "rev-1", 0.80)]}, revision_id="rev-1", limit=1)
+        windows = ParentWindowRetriever(parents=chunks.parents, children=chunks.children).fetch(hit)
+        decision = EvidenceGate(min_dense_score=0.71).assess(retrieval=HybridRetrievalResult(hit, ()), windows=windows, query="epoll ET 为什么读到 EAGAIN？")
+        self.assertTrue(decision.sufficient)
+
+    def test_evidence_gate_normalizes_topk_anchor_without_requiring_consensus(self):
+        chunks = ParentChildMarkdownChunker(tokenizer=CharacterTokenizer(), parent_max_tokens=2000, child_max_tokens=30).chunk("# Top(K)\n\nheap solution " * 12, revision_id="rev-1", source_uri="fixture.md")
+        hit = rrf_fuse({"dense": [VectorHit(chunks.children[0].id, "rev-1", 0.80)]}, revision_id="rev-1", limit=1)
+        windows = ParentWindowRetriever(parents=chunks.parents, children=chunks.children).fetch(hit)
+        decision = EvidenceGate(min_dense_score=0.71).assess(retrieval=HybridRetrievalResult(hit, ()), windows=windows, query="TopK 问题怎么做")
+        self.assertTrue(decision.sufficient)
+
+    def test_evidence_gate_requires_retrieval_consensus_for_anchorless_query(self):
+        chunks = ParentChildMarkdownChunker(tokenizer=CharacterTokenizer(), parent_max_tokens=2000, child_max_tokens=30).chunk("# 并发\n\n线程切换开销 " * 12, revision_id="rev-1", source_uri="fixture.md")
+        hit = rrf_fuse({"dense": [VectorHit(chunks.children[0].id, "rev-1", 0.80)]}, revision_id="rev-1", limit=1)
+        windows = ParentWindowRetriever(parents=chunks.parents, children=chunks.children).fetch(hit)
+        decision = EvidenceGate(min_dense_score=0.71).assess(retrieval=HybridRetrievalResult(hit, ()), windows=windows, query="线程切换为什么更轻")
+        self.assertFalse(decision.sufficient)
+        self.assertEqual(decision.reason, "retrieval_consensus_missing")
+
 
 if __name__ == "__main__": unittest.main()
