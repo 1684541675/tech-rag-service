@@ -1,9 +1,11 @@
 import unittest
+import urllib.error
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from rag_core.api import create_app
-from rag_core.generation import RagAnswerService, TokenBudgeter
+from rag_core.generation import RagAnswerService, TokenBudgeter, ZhipuChatClient
 from rag_core.ingestion import ParentChildMarkdownChunker
 from rag_core.retrieval import EvidenceDecision, ParentWindowRetriever, RetrievedContext, rrf_fuse
 from rag_core.stores import KeywordHit
@@ -34,6 +36,18 @@ def evidence(*, sufficient=True, reason="sufficient_evidence"):
 
 
 class GenerationAndApiTest(unittest.TestCase):
+    def test_glm_client_retries_transient_network_failure_once(self):
+        response = MagicMock()
+        response.read.return_value = b'{"choices": [{"message": {"content": "grounded answer"}}]}'
+        context_manager = MagicMock()
+        context_manager.__enter__.return_value = response
+        with patch("rag_core.generation.service.urllib.request.urlopen", side_effect=[urllib.error.URLError("offline"), context_manager]) as urlopen, patch("rag_core.generation.service.time.sleep") as sleep:
+            client = ZhipuChatClient(api_key="test-key", timeout_seconds=1, max_retries=1, retry_backoff_seconds=0)
+            answer = client.complete(messages=[{"role": "user", "content": "epoll"}], model="glm-test", max_tokens=10)
+        self.assertEqual(answer, "grounded answer")
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(0)
+
     def test_budget_truncates_context_and_citation_remains_traceable(self):
         service = RagAnswerService(budgeter=TokenBudgeter(Tokenizer()), chat_client=FakeChat())
         answer = service.answer(query="what is epoll", windows=windows(), evidence=evidence(), context_token_budget=30)

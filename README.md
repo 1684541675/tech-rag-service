@@ -35,6 +35,7 @@
 | `scripts/run_real_bagu_core.py` | 新建并发布 revision；会写索引并可能调用 API |
 | `scripts/query_active_bagu_core.py` | 查询当前 active revision，不重新导入文档 |
 | `scripts/evaluate_ai25_retrieval.py` | 检索与 evidence gate 回归 |
+| `scripts/serve_ai26_agent.py` | AI-26 受控 Agent API；提供 `/health`、`/agent/run` 和审批恢复接口 |
 
 ### 首次准备
 
@@ -74,7 +75,19 @@ cd D:\code\Python\ai
 - 首版 evidence gate 会在部分证据不足时返回 `no_knowledge`，但不是可靠防幻觉保证。
 - 已验证的 MongoDB 缺口题曾被误放行，并携带无关的 MySQL citation；因此不能声称 citation 总能支撑回答。
 - 当前没有多租户、认证、限流、审计、生产部署编排或高并发承诺。
-- 根目录 `Dockerfile` 仍用于早期 `ai21_bagu_rag_api.py` 原型，不是当前 AI-25 RAG Core 的端到端容器化部署。
+- 根目录 `Dockerfile` 可启动 AI-26 的 API 外壳并用于 `/health` smoke test；真实检索仍依赖外部 PostgreSQL、OpenSearch 与 Qdrant，未声明为端到端单容器部署。
+
+### AI-26 Agent 工程化边界
+
+`/agent/run` 与 `/agent/{thread_id}/approval` 支持 `X-Request-ID`；服务会生成只含任务长度与哈希摘要的结构化 trace，避免把原始提问、密钥或完整上下文写入日志。GLM 生成调用配置有限次网络重试：仅重试网络异常、429 与 5xx，其他 HTTP 错误立即失败；超时或失败会受控降级，不能伪装成模型回答。
+
+```powershell
+docker build -t tech-rag-agent .
+docker run --rm -p 8000:8000 tech-rag-agent
+curl http://127.0.0.1:8000/health
+```
+
+该 smoke test 只验证 Agent API 进程可启动；执行真实 `/agent/run` 前仍需提供外部检索基础设施和 `ZAI_API_KEY`（如需生成）。
 
 ## 早期 ai17–ai21 学习原型
 

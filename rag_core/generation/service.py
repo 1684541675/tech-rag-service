@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -76,9 +77,13 @@ class TokenBudgeter:
 
 class ZhipuChatClient:
     """Minimal stdlib GLM client; key is read only at invocation time."""
-    def __init__(self, *, api_key: str | None = None, timeout_seconds: int = 45) -> None:
+    def __init__(self, *, api_key: str | None = None, timeout_seconds: int = 45, max_retries: int = 1, retry_backoff_seconds: float = 0.5) -> None:
+        if timeout_seconds <= 0 or max_retries < 0 or retry_backoff_seconds < 0:
+            raise ValueError("timeout_seconds must be positive; retries and backoff must not be negative")
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
 
     def complete(self, *, messages: list[dict[str, str]], model: str, max_tokens: int) -> str:
         api_key = self.api_key or os.getenv("ZAI_API_KEY")
@@ -89,15 +94,26 @@ class ZhipuChatClient:
             data=json.dumps({"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.2}, ensure_ascii=False).encode("utf-8"),
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.HTTPError, urllib.error.URLError) as exc:
-            raise RuntimeError(f"GLM request failed: {exc}") from exc
+        payload = self._request_with_retry(request)
         content = str(payload.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
         if not content:
             raise RuntimeError("GLM response has no answer content")
         return content
+
+    def _request_with_retry(self, request: urllib.request.Request) -> dict[str, object]:
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise RuntimeError("GLM response is not an object")
+                return payload
+            except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+                retryable = not isinstance(exc, urllib.error.HTTPError) or exc.code == 429 or exc.code >= 500
+                if not retryable or attempt >= self.max_retries:
+                    raise RuntimeError(f"GLM request failed after {attempt + 1} attempt(s): {exc}") from exc
+                time.sleep(self.retry_backoff_seconds * (2**attempt))
+        raise RuntimeError("unreachable retry state")
 
 
 class RagAnswerService:
